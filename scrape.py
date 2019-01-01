@@ -28,7 +28,7 @@ for pid in person_ids:
     time.sleep(3)
     person = jikan.person(pid)
     name = re.sub('\s', '', person['name'])
-    path = "tmp/%s" % name
+    path = "tmp/raw_images/%s" % name
     url = person['image_url']
     r = requests.get(url, stream=True)
     if r.status_code == 200:
