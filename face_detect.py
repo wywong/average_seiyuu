@@ -10,6 +10,7 @@ logging.basicConfig(filename='logs/face_detect.log', level=logging.DEBUG)
 
 RAW_IMAGE_ROOT = 'tmp/raw_images/'
 DETECTED_FACES_ROOT = 'tmp/detected_faces/'
+AVERAGED_FACES_ROOT = 'tmp/average_faces/'
 
 HEIGHT = 350
 WIDTH = 225
@@ -73,19 +74,39 @@ def get_rgb_transform(m, offset):
     offset3 = np.array([offset[0], offset[1], 0])
     return (m3, offset3)
 
-for filename in image_filenames:
+
+def average_images(images):
+    count = float(len(images))
+    avg_img = np.zeros((HEIGHT, WIDTH, 3), np.float)
+
+    for img in images:
+        avg_img += img / count
+
+    return np.array(np.round(avg_img), dtype=np.uint8)
+
+imgs = []
+for filename in image_filenames[:3]:
     path = RAW_IMAGE_ROOT + filename
     img = np.array(Image.open(path))
 
-    is_rgb = len(img.shape) == 3
+    if len(img.shape) != 3:
+        continue
+
+    height, width, channels = img.shape
+
+    if height != HEIGHT or width != WIDTH:
+        continue
+
     dets = detector(img, 1)
 
     try:
         d = next(iter(dets))
         shape = predictor(img, d)
-        m, offset = get_affine_matrix_offset_pair(shape.parts(), is_rgb)
+        m, offset = get_affine_matrix_offset_pair(shape.parts(), is_rgb=True)
         transformed_image = ndimage.affine_transform(img, m, offset)
-        updated_image = Image.fromarray(transformed_image)
-        updated_image.save(DETECTED_FACES_ROOT + '%s.jpg' % filename)
+        imgs.append(transformed_image)
     except StopIteration:
         logging.warning("No face detected in %s" % filename)
+
+average_image = Image.fromarray(average_images(imgs))
+average_image.save(AVERAGED_FACES_ROOT + 'average.jpg')
