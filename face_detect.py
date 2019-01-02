@@ -1,6 +1,6 @@
 from PIL import Image
+from scipy import spatial
 from skimage import transform
-from scipy import ndimage
 import dlib
 import logging
 import numpy as np
@@ -31,38 +31,6 @@ EYE_HEIGHT = HEIGHT / 3.0
 image_filenames = os.listdir(RAW_IMAGE_ROOT)
 image_filenames.sort()
 
-predictor_path = os.environ['FACE_PREDICTOR']
-
-detector = dlib.get_frontal_face_detector()
-predictor = dlib.shape_predictor(predictor_path)
-
-
-def get_affine_matrix_offset_pair(parts, is_rgb):
-    t = get_affine_transform(parts)
-    m = t[np.ix_([0, 1], [0, 1])]
-    offset = t[np.ix_([0, 1], [2])].flatten()
-    if is_rgb:
-        return get_rgb_transform(m, offset)
-    else:
-        return (m, offset)
-
-
-def get_affine_transform(parts):
-    p1 = parts[LEFT_EYE_CORNER_INDEX]
-    p2 = parts[RIGHT_EYE_CORNER_INDEX]
-    old_coords = np.array([
-        [p1.y, p1.x],
-        [p2.y, p2.x]
-    ])
-    new_coords = np.array([
-        [EYE_HEIGHT, LEFT_X],
-        [EYE_HEIGHT, RIGHT_X]
-    ])
-    similarity_transformation = transform.estimate_transform(
-        'similarity', new_coords, old_coords
-    )
-    return similarity_transformation.params
-
 
 def get_rgb_transform(m, offset):
     m3 = np.zeros(shape=(3, 3))
@@ -75,14 +43,127 @@ def get_rgb_transform(m, offset):
     return (m3, offset3)
 
 
-def average_images(images):
-    count = float(len(images))
-    avg_img = np.zeros((HEIGHT, WIDTH, 3), np.float)
+class PreprocessedImage:
+    """
+    image - the original image as a numpy array
+    landmarks - the landmarks in the original coordinate system
+    aligned_marks - landmarks with the eye's aligned
+    """
+    def __init__(self, image, landmarks, aligned_marks):
+        self.image = image
+        self.landmarks = landmarks
+        self.aligned_marks = aligned_marks
 
-    for img in images:
-        avg_img += img / count
 
-    return np.array(np.round(avg_img), dtype=np.uint8)
+class FacePreprocessor:
+    def __init__(self):
+        self.detector = dlib.get_frontal_face_detector()
+        self.predictor = dlib.shape_predictor(os.environ['FACE_PREDICTOR'])
+
+    def preprocess(self, image):
+        detected_faces = self.detector(image, 1)
+        try:
+            detected_face = next(iter(detected_faces))
+            shape = self.predictor(image, detected_face)
+            landmarks = self.landmarks(detected_face, shape)
+            m, offset = self.get_affine_matrix_offset_pair(landmarks)
+            t = np.insert(m, 2, values=offset, axis=1)
+            landmarks_padded = np.transpose(
+                np.insert(landmarks, 2, values=np.ones(68), axis=1)
+            )
+            aligned_marks = np.transpose(np.matmul(t, landmarks_padded))
+            return PreprocessedImage(image, landmarks, aligned_marks)
+
+        except StopIteration:
+            return None
+
+    """
+    returns a numpy array of landmarks [x, y]
+    68 shape landmarks and 8 bounding box landmarks
+    """
+    def landmarks(self, detected_face, shape):
+        landmarks_array = []
+        for part in shape.parts():
+            landmarks_array.append([part.y, part.x])
+
+        return np.array(landmarks_array)
+
+    def get_affine_matrix_offset_pair(self, landmarks):
+        t = self.get_affine_transform(landmarks)
+        m = t[np.ix_([0, 1], [0, 1])]
+        offset = t[np.ix_([0, 1], [2])].flatten()
+        return (m, offset)
+
+    def get_affine_transform(self, landmarks):
+        p1 = landmarks[LEFT_EYE_CORNER_INDEX]
+        p2 = landmarks[RIGHT_EYE_CORNER_INDEX]
+        old_coords = np.array([
+            p1, p2
+        ])
+        new_coords = np.array([
+            [EYE_HEIGHT, LEFT_X],
+            [EYE_HEIGHT, RIGHT_X]
+        ])
+        similarity_transformation = transform.estimate_transform(
+            'similarity', old_coords, new_coords
+        )
+        return similarity_transformation.params
+
+
+class FaceMerger:
+    def merge(self, preprocessed_images):
+        aligned_marks = list(
+            map(lambda p: p.aligned_marks, preprocessed_images)
+        )
+        avg_landmarks = self.average_np_arrays(aligned_marks).astype('uint8')
+        target_triangulation = \
+            self.to_delaunay_triangulation(avg_landmarks)
+        for preprocessed_image in preprocessed_images:
+            src_triangulation = \
+                self.to_delaunay_triangulation(preprocessed_image.landmarks)
+            break
+        return None
+
+    def average_np_arrays(self, arrays):
+        shape = arrays[0].shape
+        count = float(len(arrays))
+        avg_array = np.zeros(shape, np.float)
+
+        for arr in arrays:
+            avg_array += arr / count
+
+        return np.round(avg_array)
+
+    def to_delaunay_triangulation(self, marks):
+        all_marks = np.insert(
+            marks, len(marks), self.get_box_landmarks(), axis=0
+        )
+
+        return spatial.Delaunay(all_marks).simplices
+
+    def get_box_landmarks(self):
+        landmarks_array = []
+        bottom = HEIGHT
+        top = 0
+        left = 0
+        right = WIDTH
+
+        mid_x = left + (right - left) / 2
+        mid_y = bottom - (bottom - top) / 2
+
+        landmarks_array.append([mid_y, right])
+        landmarks_array.append([top, right])
+        landmarks_array.append([top, mid_x])
+        landmarks_array.append([top, left])
+        landmarks_array.append([mid_y, left])
+        landmarks_array.append([bottom, left])
+        landmarks_array.append([bottom, mid_x])
+        landmarks_array.append([bottom, right])
+        return landmarks_array
+
+
+preprocessor = FacePreprocessor()
+merger = FaceMerger()
 
 imgs = []
 for filename in image_filenames[:3]:
@@ -90,23 +171,22 @@ for filename in image_filenames[:3]:
     img = np.array(Image.open(path))
 
     if len(img.shape) != 3:
+        logging.warning('Skipping %s because it is grayscale')
         continue
 
     height, width, channels = img.shape
 
     if height != HEIGHT or width != WIDTH:
+        logging.warning('Skipping %s because it is not the right size')
         continue
 
-    dets = detector(img, 1)
-
-    try:
-        d = next(iter(dets))
-        shape = predictor(img, d)
-        m, offset = get_affine_matrix_offset_pair(shape.parts(), is_rgb=True)
-        transformed_image = ndimage.affine_transform(img, m, offset)
-        imgs.append(transformed_image)
-    except StopIteration:
+    preprocessed_image = preprocessor.preprocess(img)
+    if preprocessed_image is None:
         logging.warning("No face detected in %s" % filename)
+    else:
+        imgs.append(preprocessed_image)
 
-average_image = Image.fromarray(average_images(imgs))
-average_image.save(AVERAGED_FACES_ROOT + 'average.jpg')
+result = merger.merge(imgs)
+
+# average_image = Image.fromarray(average_images(imgs))
+# average_image.save(AVERAGED_FACES_ROOT + 'average.jpg')
