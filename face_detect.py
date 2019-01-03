@@ -1,6 +1,7 @@
 from PIL import Image
-from scipy import spatial
+from scipy import ndimage, spatial
 from skimage import transform
+from skimage.draw import polygon
 import dlib
 import logging
 import numpy as np
@@ -115,14 +116,73 @@ class FaceMerger:
         aligned_marks = list(
             map(lambda p: p.aligned_marks, preprocessed_images)
         )
-        avg_landmarks = self.average_np_arrays(aligned_marks).astype('uint8')
-        target_triangulation = \
-            self.to_delaunay_triangulation(avg_landmarks)
+        target_landmarks = self.append_box_landmarks(
+            self.average_np_arrays(aligned_marks).astype('uint8')
+        )
+
+        # todo need to align the triangles
+        target_triangulation = spatial.Delaunay(target_landmarks).simplices
         for preprocessed_image in preprocessed_images:
-            src_triangulation = \
-                self.to_delaunay_triangulation(preprocessed_image.landmarks)
+            transformed_image = self.warp_triangles_image(
+                preprocessed_image, target_landmarks, target_triangulation
+            )
             break
         return None
+
+    def warp_triangles_image(self, preprocessed_image,
+                             target_landmarks, target_triangulation):
+        src_landmarks = self.append_box_landmarks(preprocessed_image.landmarks)
+        src_triangulation = spatial.Delaunay(src_landmarks).simplices
+        result = np.zeros((HEIGHT, WIDTH, 3), dtype=float)
+        n = len(src_triangulation)
+        for (i, src_tri, target_tri) in zip(range(0, n),
+                                            src_triangulation,
+                                            target_triangulation):
+            img = np.zeros((HEIGHT, WIDTH), dtype=np.uint8)
+            src_r, src_c = self.marks_to_coords(src_tri, src_landmarks)
+            rr, cc = polygon(src_r, src_c)
+            mask = np.zeros((HEIGHT, WIDTH, 3), dtype=np.uint8)
+            mask[rr, cc] = [1, 1, 1]
+            src_coords = np.transpose(np.array([src_r, src_c]))
+            target_r, target_c = self.marks_to_coords(target_tri,
+                                                      target_landmarks)
+            target_coords = np.transpose(np.array([target_r, target_c]))
+            similarity_transformation = transform.estimate_transform(
+                'similarity', target_coords, src_coords
+            )
+            params = similarity_transformation.params
+            m = params.copy()
+            m[0][2] = 0
+            m[1][2] = 0
+            offset = [params[0][2], params[1][2], 0]
+            img = mask * preprocessed_image.image
+            rr, cc = polygon(target_r, target_c)
+            region = np.zeros((HEIGHT, WIDTH, 3), dtype=np.uint8)
+            region[rr, cc] = [255, 255, 255]
+            transformed = ndimage.affine_transform(img, m, offset)
+            result += transformed
+
+            out = Image.fromarray(img)
+            out.save('tmp/triangles/%03d_triangle.jpg' % i)
+            out = Image.fromarray(region)
+            out.save('tmp/triangles/%03d_target_region.jpg' % i)
+            # out = Image.fromarray(transformed)
+            # out.save('tmp/triangles/%03d_warped_triangle.jpg' % i)
+        # out = Image.fromarray(np.round(result / n).astype('uint8'))
+        # out.save('tmp/triangles/result.jpg')
+
+
+
+
+    def marks_to_coords(self, tri, marks):
+        row_coords = []
+        col_coords = []
+        for p in tri:
+            y = marks[p][0]
+            x = marks[p][1]
+            row_coords.append(y)
+            col_coords.append(x)
+        return (row_coords, col_coords)
 
     def average_np_arrays(self, arrays):
         shape = arrays[0].shape
@@ -134,14 +194,7 @@ class FaceMerger:
 
         return np.round(avg_array)
 
-    def to_delaunay_triangulation(self, marks):
-        all_marks = np.insert(
-            marks, len(marks), self.get_box_landmarks(), axis=0
-        )
-
-        return spatial.Delaunay(all_marks).simplices
-
-    def get_box_landmarks(self):
+    def append_box_landmarks(self, marks):
         landmarks_array = []
         bottom = HEIGHT
         top = 0
@@ -159,7 +212,9 @@ class FaceMerger:
         landmarks_array.append([bottom, left])
         landmarks_array.append([bottom, mid_x])
         landmarks_array.append([bottom, right])
-        return landmarks_array
+        return np.insert(
+            marks, len(marks), landmarks_array, axis=0
+        )
 
 
 preprocessor = FacePreprocessor()

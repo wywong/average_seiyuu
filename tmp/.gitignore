@@ -1,4 +1,2 @@
-raw_images/
-detected_faces/
-average_faces/
-delaunay/
+*
+!.gitignore
