@@ -117,35 +117,32 @@ class FaceMerger:
             map(lambda p: p.aligned_marks, preprocessed_images)
         )
         target_landmarks = self.append_box_landmarks(
-            self.average_np_arrays(aligned_marks).astype('uint8')
+            self.average_np_arrays(aligned_marks)
         )
 
-        # todo need to align the triangles
-        target_triangulation = spatial.Delaunay(target_landmarks).simplices
+        result = np.zeros((HEIGHT, WIDTH, 3), dtype=float)
         for preprocessed_image in preprocessed_images:
             transformed_image = self.warp_triangles_image(
-                preprocessed_image, target_landmarks, target_triangulation
+                preprocessed_image, target_landmarks
             )
-            break
+            result += transformed_image
+        result = np.floor(result / len(preprocessed_images)).astype(np.uint8)
+        out = Image.fromarray(result)
+        out.save('tmp/triangles/result.jpg')
         return None
 
-    def warp_triangles_image(self, preprocessed_image,
-                             target_landmarks, target_triangulation):
+    def warp_triangles_image(self, preprocessed_image, target_landmarks):
         src_landmarks = self.append_box_landmarks(preprocessed_image.landmarks)
-        src_triangulation = spatial.Delaunay(src_landmarks).simplices
+        triangulation = spatial.Delaunay(src_landmarks).simplices
         result = np.zeros((HEIGHT, WIDTH, 3), dtype=float)
-        n = len(src_triangulation)
-        for (i, src_tri, target_tri) in zip(range(0, n),
-                                            src_triangulation,
-                                            target_triangulation):
+        n = len(triangulation)
+        mask_sum = np.zeros((HEIGHT, WIDTH, 3), np.int32)
+        for (i, tri) in zip(range(0, n), triangulation):
             img = np.zeros((HEIGHT, WIDTH), dtype=np.uint8)
-            src_r, src_c = self.marks_to_coords(src_tri, src_landmarks)
-            rr, cc = polygon(src_r, src_c)
-            mask = np.zeros((HEIGHT, WIDTH, 3), dtype=np.uint8)
-            mask[rr, cc] = [1, 1, 1]
+            src_r, src_c = self.marks_to_coords(tri, src_landmarks)
+            mask = self.get_mask(src_r, src_c)
             src_coords = np.transpose(np.array([src_r, src_c]))
-            target_r, target_c = self.marks_to_coords(target_tri,
-                                                      target_landmarks)
+            target_r, target_c = self.marks_to_coords(tri, target_landmarks)
             target_coords = np.transpose(np.array([target_r, target_c]))
             similarity_transformation = transform.estimate_transform(
                 'similarity', target_coords, src_coords
@@ -156,22 +153,25 @@ class FaceMerger:
             m[1][2] = 0
             offset = [params[0][2], params[1][2], 0]
             img = mask * preprocessed_image.image
-            rr, cc = polygon(target_r, target_c)
-            region = np.zeros((HEIGHT, WIDTH, 3), dtype=np.uint8)
-            region[rr, cc] = [255, 255, 255]
             transformed = ndimage.affine_transform(img, m, offset)
             result += transformed
+            transformed_mask = np.where(transformed > 0, 1, 0).astype(np.uint8)
+            mask_sum += transformed_mask
 
-            out = Image.fromarray(img)
-            out.save('tmp/triangles/%03d_triangle.jpg' % i)
-            out = Image.fromarray(region)
-            out.save('tmp/triangles/%03d_target_region.jpg' % i)
-            # out = Image.fromarray(transformed)
-            # out.save('tmp/triangles/%03d_warped_triangle.jpg' % i)
-        # out = Image.fromarray(np.round(result / n).astype('uint8'))
+        mask_sum = mask_sum + np.where(mask_sum == 0, 1, 0)
+        result = result * np.reciprocal(mask_sum)
+
+        # out = Image.fromarray(np.floor(result).astype('uint8'))
         # out.save('tmp/triangles/result.jpg')
+        return result
 
 
+
+    def get_mask(self, r, c):
+        rr, cc = polygon(r, c)
+        mask = np.zeros((HEIGHT, WIDTH, 3), dtype=np.uint8)
+        mask[rr, cc] = [1, 1, 1]
+        return mask
 
 
     def marks_to_coords(self, tri, marks):
