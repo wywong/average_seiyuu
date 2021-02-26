@@ -15,7 +15,7 @@ matplotlib==3.0.2
 multidict==4.5.2
 networkx==2.2
 numpy==1.15.4
-Pillow==6.2.0
+Pillow==7.1.0
 pyparsing==2.3.0
 python-dateutil==2.7.5
 PyWavelets==1.0.1
